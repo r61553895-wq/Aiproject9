@@ -76,17 +76,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       }
 
       // If server explicitly said wrong password, report it directly
-      if (serverRes.status === 401) {
-        setError(serverRes.data?.error || 'Неверный пароль. Пожалуйста, проверьте введённые данные.');
+      const serverMsg = serverRes.data?.message || serverRes.data?.error || '';
+      if (serverRes.status === 401 && serverMsg.toLowerCase().includes('неверный пароль')) {
+        setError('Неверный пароль. Пожалуйста, проверьте введённые данные.');
         setLoading(false);
         return;
       }
 
-      // 2. Second: Try Firebase Auth
+      // 2. Second: Try Firebase Auth / Cloud Firestore for cross-device accounts
       const fbRes = await loginFirebaseUser({ login: cleanLogin, password: cleanPassword });
       if (fbRes.success && fbRes.account) {
         saveAccountPassword(fbRes.account.username, cleanPassword);
-        // Sync with backend
+        // Sync with backend so server has it
         safeFetchJson('/api/auth/sync-accounts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -95,7 +96,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           }),
         }).catch(() => {});
 
-        setSuccessMsg('Вход выполнен через Firebase! Добро пожаловать.');
+        setSuccessMsg('Вход выполнен через облачную базу! Добро пожаловать, ' + fbRes.account.name);
         setTimeout(() => {
           onAuthSuccess(fbRes.account!);
           onClose();
@@ -103,10 +104,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         return;
       }
 
+      // If Firebase explicitly detected the user but password was wrong, report it
+      if (fbRes.message && fbRes.message.toLowerCase().includes('неверный пароль')) {
+        setError('Неверный пароль. Пожалуйста, проверьте введённые данные.');
+        setLoading(false);
+        return;
+      }
+
       // 3. Third: Try local device account
       const localRes = loginLocalAccount({ login: cleanLogin, password: cleanPassword });
       if (localRes.success && localRes.account) {
-        // Sync account to server so it is recognized globally
         safeFetchJson('/api/auth/sync-accounts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -123,11 +130,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         return;
       }
 
+      if (localRes.message && localRes.message.toLowerCase().includes('неверный пароль')) {
+        setError('Неверный пароль. Пожалуйста, проверьте введённые данные.');
+        setLoading(false);
+        return;
+      }
+
       setError(
-        localRes.message ||
-        fbRes.message ||
-        serverRes.data?.error ||
-        'Аккаунт с таким логином не найден. Проверьте правильность логина или зарегистрируйтесь.'
+        `Аккаунт с логином «${cleanLogin}» не найден. Проверьте правильность логина или зарегистрируйтесь.`
       );
     } catch (err: any) {
       setError(err.message || 'Ошибка соединения при входе в аккаунт.');
@@ -158,7 +168,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setSuccessMsg(null);
 
     try {
-      // 1. Register on Server (primary authority)
+      // 1. Strict duplicate check on Server (primary authority)
       const serverRes = await safeFetchJson<{
         success: boolean;
         account?: UserAccount;
@@ -175,51 +185,61 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         }),
       }, 6000);
 
-      let createdAccount: UserAccount | undefined = serverRes.data?.account;
+      if (!serverRes.ok || (serverRes.data && !serverRes.data.success)) {
+        const errorMsg = serverRes.data?.message || serverRes.data?.error || serverRes.error;
+        if (
+          errorMsg &&
+          (errorMsg.includes('уже существует') ||
+            errorMsg.includes('уже зарегистрирован') ||
+            serverRes.status === 400 ||
+            serverRes.status === 409)
+        ) {
+          setError(errorMsg || `Пользователь с логином «${cleanLogin}» уже существует. Пожалуйста, выполните вход.`);
+          setLoading(false);
+          return;
+        }
+      }
 
-      if (!serverRes.ok && serverRes.status === 400) {
-        setError(serverRes.data?.error || 'Пользователь с таким логином уже существует.');
+      // 2. Strict duplicate check & registration in Firebase Cloud Firestore
+      const fbRes = await registerFirebaseUser({
+        login: cleanLogin,
+        password: cleanPassword,
+        name: cleanName,
+        email: cleanEmail,
+      });
+
+      if (!fbRes.success && (fbRes.message.includes('уже существует') || fbRes.message.includes('уже зарегистрирован'))) {
+        setError(fbRes.message);
         setLoading(false);
         return;
       }
 
-      // 2. Also register in Firebase Auth/Firestore for persistence
-      try {
-        const fbRes = await registerFirebaseUser({
-          login: cleanLogin,
-          password: cleanPassword,
-          name: cleanName,
-          email: cleanEmail,
-        });
-        if (fbRes.success && fbRes.account && !createdAccount) {
-          createdAccount = fbRes.account;
-        }
-      } catch (fbErr) {
-        console.warn('Firebase register notice:', fbErr);
-      }
-
-      // 3. Also save to local storage
+      // 3. Local storage check
       const localRes = registerLocalAccount({
         username: cleanLogin,
         name: cleanName,
         email: cleanEmail,
         password: cleanPassword,
-        currentUserId: createdAccount?.id,
+        currentUserId: serverRes.data?.account?.id || fbRes.account?.id,
       });
 
-      if (!createdAccount && localRes.account) {
-        createdAccount = localRes.account;
+      if (!localRes.success && (localRes.message.includes('уже существует') || localRes.message.includes('уже зарегистрирован'))) {
+        setError(localRes.message);
+        setLoading(false);
+        return;
       }
+
+      const createdAccount = serverRes.data?.account || fbRes.account || localRes.account;
 
       if (createdAccount) {
         saveAccountPassword(cleanLogin, cleanPassword);
         setSuccessMsg('Аккаунт успешно создан! Начислено +10 000 токенов.');
         setTimeout(() => {
-          onAuthSuccess(createdAccount!, 10000);
+          onAuthSuccess(createdAccount, 10000);
           onClose();
         }, 700);
       } else {
-        setError('Не удалось создать аккаунт. Попробуйте другой логин.');
+        setError(serverRes.data?.message || fbRes.message || 'Не удалось создать аккаунт. Попробуйте другой логин.');
       }
     } catch (err: any) {
       setError(err.message || 'Ошибка при регистрации аккаунта.');

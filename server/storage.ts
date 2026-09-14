@@ -185,19 +185,60 @@ export function getUser(userId: string): UserSession {
 
 export function updateUserTokens(userId: string, tokensDelta: number): UserSession {
   const store = loadStore();
-  const user = getUser(userId);
+  if (!store.accounts) store.accounts = {};
+  if (!store.users) store.users = {};
 
-  user.tokensBalance += tokensDelta;
-  if (tokensDelta < 0) {
-    user.totalTokensUsed += Math.abs(tokensDelta);
-    store.totalTokensConsumed += Math.abs(tokensDelta);
+  const clean = userId.trim();
+  const normalized = clean.toLowerCase();
+  const normalizedWithoutUsr = normalized.replace(/^usr_/, '');
+
+  // 1. Locate account by id, usr_ prefix, or username
+  let targetAccount =
+    store.accounts[clean] ||
+    store.accounts[normalized] ||
+    store.accounts[`usr_${normalizedWithoutUsr}`] ||
+    store.accounts[normalizedWithoutUsr];
+
+  if (!targetAccount) {
+    for (const acc of Object.values(store.accounts)) {
+      const u = (acc.username || '').toLowerCase();
+      const aId = (acc.id || '').toLowerCase();
+      if (
+        u === normalized ||
+        u === normalizedWithoutUsr ||
+        aId === normalized ||
+        aId === clean.toLowerCase() ||
+        aId === `usr_${normalizedWithoutUsr}` ||
+        (acc.email && acc.email.toLowerCase() === normalized)
+      ) {
+        targetAccount = acc;
+        break;
+      }
+    }
   }
 
-  store.users[userId] = user;
+  const effectiveId = targetAccount ? targetAccount.id : clean;
+  const user = getUser(effectiveId);
 
-  if (store.accounts && store.accounts[userId]) {
-    store.accounts[userId].tokensBalance = user.tokensBalance;
-    store.accounts[userId].totalTokensUsed = user.totalTokensUsed;
+  user.tokensBalance = Math.max(0, (user.tokensBalance || 0) + tokensDelta);
+  if (tokensDelta < 0) {
+    user.totalTokensUsed = (user.totalTokensUsed || 0) + Math.abs(tokensDelta);
+    store.totalTokensConsumed = (store.totalTokensConsumed || 0) + Math.abs(tokensDelta);
+  }
+
+  store.users[effectiveId] = user;
+  if (clean !== effectiveId) {
+    store.users[clean] = { ...user, id: clean };
+  }
+
+  if (targetAccount) {
+    targetAccount.tokensBalance = user.tokensBalance;
+    targetAccount.totalTokensUsed = user.totalTokensUsed;
+    store.accounts[targetAccount.id] = targetAccount;
+    // Also update alias if keyed by username or usr_id
+    if (store.accounts[targetAccount.username]) {
+      store.accounts[targetAccount.username].tokensBalance = user.tokensBalance;
+    }
   }
 
   saveStore(store);
@@ -446,8 +487,43 @@ export function loginAccount(
 
 export function getAccountById(id: string): UserAccount | null {
   const store = loadStore();
-  const acc = store.accounts?.[id];
+  if (!store.accounts) return null;
+  const clean = id.trim();
+  const lower = clean.toLowerCase();
+  const lowerWithoutUsr = lower.replace(/^usr_/, '');
+
+  let acc =
+    store.accounts[clean] ||
+    store.accounts[lower] ||
+    store.accounts[`usr_${lowerWithoutUsr}`] ||
+    store.accounts[lowerWithoutUsr];
+
+  if (!acc) {
+    for (const item of Object.values(store.accounts)) {
+      const u = (item.username || '').toLowerCase();
+      const aId = (item.id || '').toLowerCase();
+      if (
+        u === lower ||
+        u === lowerWithoutUsr ||
+        aId === clean.toLowerCase() ||
+        aId === lower ||
+        aId === `usr_${lowerWithoutUsr}` ||
+        (item.email && item.email.toLowerCase() === lower)
+      ) {
+        acc = item;
+        break;
+      }
+    }
+  }
+
   if (!acc) return null;
+
+  // Sync latest token balance from user session if higher
+  const user = store.users?.[acc.id] || store.users?.[clean];
+  if (user && typeof user.tokensBalance === 'number') {
+    acc.tokensBalance = Math.max(acc.tokensBalance, user.tokensBalance);
+  }
+
   const pub = { ...acc };
   delete (pub as any).passwordHash;
   delete (pub as any).salt;

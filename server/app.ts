@@ -80,6 +80,35 @@ app.get(['/api/user/:userId', '/user/:userId'], (req: Request, res: Response) =>
   res.json({ user, account });
 });
 
+app.get(['/api/auth/me', '/auth/me'], (req: Request, res: Response) => {
+  const userId = (req.query.userId as string) || (req.headers['x-user-id'] as string);
+  if (!userId) {
+    return res.status(400).json({ success: false, error: 'missing_user_id' });
+  }
+  const account = getAccountById(userId);
+  const user = getUser(userId);
+  if (account) {
+    return res.json({ success: true, account, user });
+  }
+  if (user) {
+    return res.json({
+      success: true,
+      account: {
+        id: user.id,
+        username: user.username || user.name || user.id,
+        name: user.name || 'Пользователь',
+        tokensBalance: user.tokensBalance,
+        totalTokensUsed: user.totalTokensUsed,
+        createdAt: user.createdAt,
+        lastLoginAt: user.lastActive,
+        role: 'user',
+      },
+      user,
+    });
+  }
+  res.status(404).json({ success: false, error: 'not_found' });
+});
+
 // -------------------------------------------------------------
 // AUTHENTICATION & REGISTRATION
 // -------------------------------------------------------------

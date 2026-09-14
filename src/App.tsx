@@ -106,11 +106,12 @@ export const App: React.FC = () => {
     } catch (e) {}
   }, [tokensBalance]);
 
-  // Sync on startup with server
+  // Sync on startup with server and listen for token updates
   useEffect(() => {
     syncSavedAccountsWithServer();
 
-    if (currentUser?.id) {
+    const fetchCurrentBalance = () => {
+      if (!currentUser?.id) return;
       safeFetchJson<{ account?: UserAccount }>(`/api/auth/me?userId=${encodeURIComponent(currentUser.id)}`, {}, 4000)
         .then((res) => {
           if (res.ok && res.data?.account) {
@@ -120,8 +121,25 @@ export const App: React.FC = () => {
           }
         })
         .catch(() => {});
-    }
-  }, []);
+    };
+
+    fetchCurrentBalance();
+
+    const handleTokensUpdated = (e: any) => {
+      if (typeof e.detail?.balance === 'number') {
+        setTokensBalance(e.detail.balance);
+        setCurrentUser((prev) => (prev ? { ...prev, tokensBalance: e.detail.balance } : prev));
+      }
+    };
+
+    window.addEventListener('grokson_tokens_updated', handleTokensUpdated);
+    window.addEventListener('focus', fetchCurrentBalance);
+
+    return () => {
+      window.removeEventListener('grokson_tokens_updated', handleTokensUpdated);
+      window.removeEventListener('focus', fetchCurrentBalance);
+    };
+  }, [currentUser?.id]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });

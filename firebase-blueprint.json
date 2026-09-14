@@ -1,0 +1,48 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User account in Grokson platform",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique identifier" },
+        "username": { "type": "string", "description": "Normalized lowercase unique username" },
+        "name": { "type": "string", "description": "Display name" },
+        "email": { "type": "string", "description": "Optional email" },
+        "passwordHash": { "type": "string", "description": "Salted SHA-256 hash" },
+        "salt": { "type": "string", "description": "Cryptographic salt" },
+        "tokensBalance": { "type": "number", "description": "Current balance of tokens" },
+        "totalTokensUsed": { "type": "number", "description": "Total consumed tokens" },
+        "createdAt": { "type": "number", "description": "Account registration timestamp" },
+        "lastLoginAt": { "type": "number", "description": "Last login timestamp" },
+        "role": { "type": "string", "enum": ["user", "admin"], "description": "User role" }
+      },
+      "required": ["id", "username", "tokensBalance", "role"]
+    },
+    "TokenKey": {
+      "title": "TokenKey",
+      "description": "Voucher activation key for tokens",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "description": "Unique activation code" },
+        "tokens": { "type": "number", "description": "Amount of tokens" },
+        "label": { "type": "string", "description": "Key description or label" },
+        "createdAt": { "type": "number", "description": "Creation timestamp" },
+        "isRedeemed": { "type": "boolean", "description": "Whether redeemed" },
+        "maxUses": { "type": "number", "description": "Max allowed redemptions" },
+        "usedCount": { "type": "number", "description": "Count of times used" }
+      },
+      "required": ["code", "tokens"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Registered user accounts and balance information"
+    },
+    "/keys/{keyCode}": {
+      "schema": "TokenKey",
+      "description": "Promo and voucher keys"
+    }
+  }
+}

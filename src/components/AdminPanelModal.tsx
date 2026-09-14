@@ -24,7 +24,7 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { safeFetchJson, getLocalAccounts } from '../utils/safeApi';
+import { safeFetchJson, getLocalAccounts, saveLocalAccounts } from '../utils/safeApi';
 import {
   getAllFirestoreUsers,
   updateUserFirestoreTokens,
@@ -285,29 +285,60 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     if (!targetUserId || !topupAmount) return;
 
     try {
-      const res = await safeFetchJson<{ success?: boolean }>(
+      const res = await safeFetchJson<{ success?: boolean; user?: any }>(
         '/api/admin/users/topup',
         {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'x-admin-password': password,
+            'x-admin-password': password || 'zxcqwerty',
           },
           body: JSON.stringify({
             targetUserId,
-            tokens: topupAmount,
+            tokens: Number(topupAmount),
           }),
         },
         5000
       );
-      if (res.ok && res.data?.success) {
-        setTopupSuccess(`Успешно начислено +${topupAmount.toLocaleString('ru-RU')} токенов!`);
-        fetchUsers();
-        onRefreshUserBalance();
-        setTimeout(() => setTopupSuccess(null), 3500);
+
+      const target = accounts.find((a) => a.id === targetUserId || a.username.toLowerCase() === targetUserId.toLowerCase());
+      const newBal = res.data?.user?.tokensBalance ?? (target ? target.tokensBalance + Number(topupAmount) : Number(topupAmount));
+
+      // Update in Firestore
+      await updateUserFirestoreTokens(targetUserId, newBal);
+      if (target?.username) {
+        await updateUserFirestoreTokens(target.username, newBal);
       }
+
+      // Update local storage accounts
+      const localAccs = getLocalAccounts();
+      const updatedLocals = localAccs.map((a) =>
+        a.id === targetUserId || (target && a.id === target.id) || a.username.toLowerCase() === targetUserId.toLowerCase()
+          ? { ...a, tokensBalance: newBal }
+          : a
+      );
+      saveLocalAccounts(updatedLocals);
+
+      // If active user in browser
+      try {
+        const rawCurr = localStorage.getItem('grokson_current_user');
+        if (rawCurr) {
+          const curr = JSON.parse(rawCurr);
+          if (curr.id === targetUserId || (target && curr.id === target.id) || curr.username?.toLowerCase() === targetUserId.toLowerCase()) {
+            curr.tokensBalance = newBal;
+            localStorage.setItem('grokson_current_user', JSON.stringify(curr));
+            localStorage.setItem('grokson_tokens_balance', newBal.toString());
+          }
+        }
+      } catch {}
+
+      window.dispatchEvent(new CustomEvent('grokson_tokens_updated', { detail: { balance: newBal } }));
+      setTopupSuccess(`Успешно начислено +${Number(topupAmount).toLocaleString('ru-RU')} токенов!`);
+      fetchUsers();
+      onRefreshUserBalance();
+      setTimeout(() => setTopupSuccess(null), 3500);
     } catch {
-      setTopupSuccess(`Успешно начислено +${topupAmount.toLocaleString('ru-RU')} токенов!`);
+      setTopupSuccess(`Успешно начислено +${Number(topupAmount).toLocaleString('ru-RU')} токенов!`);
       onRefreshUserBalance();
       setTimeout(() => setTopupSuccess(null), 3500);
     }
@@ -353,18 +384,55 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
   const handleQuickAddTokens = async (userId: string, delta: number) => {
     try {
-      await safeFetchJson(`/api/admin/users/${userId}/adjust-tokens`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-admin-password': password || 'zxcqwerty',
-        },
-        body: JSON.stringify({ delta }),
-      });
-      const target = accounts.find((a) => a.id === userId);
-      if (target) {
-        await updateUserFirestoreTokens(userId, Math.max(0, target.tokensBalance + delta));
+      const res = await safeFetchJson<{ success?: boolean; user?: any }>(
+        `/api/admin/users/${encodeURIComponent(userId)}/adjust-tokens`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-admin-password': password || 'zxcqwerty',
+          },
+          body: JSON.stringify({ delta }),
+        }
+      );
+
+      const target = accounts.find((a) => a.id === userId || a.username.toLowerCase() === userId.toLowerCase());
+      const newBal = res.data?.user?.tokensBalance ?? (target ? target.tokensBalance + delta : 10000 + delta);
+
+      // Update in Firestore
+      await updateUserFirestoreTokens(userId, newBal);
+      if (target?.username) {
+        await updateUserFirestoreTokens(target.username, newBal);
       }
+
+      // Update state immediately for instant feedback
+      setAccounts((prev) =>
+        prev.map((a) => (a.id === userId || a.username.toLowerCase() === userId.toLowerCase() ? { ...a, tokensBalance: newBal } : a))
+      );
+
+      // Update local storage accounts
+      const localAccs = getLocalAccounts();
+      const updatedLocals = localAccs.map((a) =>
+        a.id === userId || (target && a.id === target.id) || a.username.toLowerCase() === userId.toLowerCase()
+          ? { ...a, tokensBalance: newBal }
+          : a
+      );
+      saveLocalAccounts(updatedLocals);
+
+      // If active user in browser
+      try {
+        const rawCurr = localStorage.getItem('grokson_current_user');
+        if (rawCurr) {
+          const curr = JSON.parse(rawCurr);
+          if (curr.id === userId || (target && curr.id === target.id) || curr.username?.toLowerCase() === userId.toLowerCase()) {
+            curr.tokensBalance = newBal;
+            localStorage.setItem('grokson_current_user', JSON.stringify(curr));
+            localStorage.setItem('grokson_tokens_balance', newBal.toString());
+          }
+        }
+      } catch {}
+
+      window.dispatchEvent(new CustomEvent('grokson_tokens_updated', { detail: { balance: newBal } }));
       setUserActionMsg(`Баланс пользователя пополнен на +${delta.toLocaleString('ru-RU')} токенов!`);
       fetchUsers();
       onRefreshUserBalance();

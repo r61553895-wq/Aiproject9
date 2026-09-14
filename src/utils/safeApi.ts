@@ -190,9 +190,8 @@ export function registerLocalAccount(params: {
 
   if (existing) {
     return {
-      success: true,
-      message: 'Аккаунт синхронизирован на устройстве.',
-      account: existing,
+      success: false,
+      message: `Пользователь с логином «${params.username}» уже существует на этом устройстве. Пожалуйста, выполните вход.`,
     };
   }
 
