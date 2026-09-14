@@ -17,6 +17,15 @@
       "isRedeemed": false,
       "maxUses": 100,
       "usedCount": 0
+    },
+    "GROK-25001-O3NS": {
+      "code": "GROK-25001-O3NS",
+      "tokens": 25001,
+      "label": "Тест 25001 токенов",
+      "createdAt": 1789384779348,
+      "isRedeemed": false,
+      "maxUses": 1,
+      "usedCount": 0
     }
   },
   "users": {

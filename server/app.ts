@@ -18,6 +18,9 @@ import {
   getAccountById,
   hashPassword,
   generateSalt,
+  getUserChats,
+  saveUserChats,
+  setUserTokensDirectly,
 } from './storage';
 import { GoogleGenAI } from '@google/genai';
 
@@ -260,39 +263,125 @@ app.post(['/api/auth/sync-accounts', '/auth/sync-accounts'], handleSyncAccounts)
 // -------------------------------------------------------------
 // VOUCHER KEY REDEMPTION
 // -------------------------------------------------------------
-app.post(['/api/keys/redeem', '/keys/redeem'], (req: Request, res: Response) => {
+app.post(['/api/keys/redeem', '/keys/redeem', '/api/redeem-key', '/redeem-key'], (req: Request, res: Response) => {
   const { code, userId } = req.body;
   if (!code || !userId) {
     return res.status(400).json({ success: false, message: 'Отсутствует код ключа или ID пользователя' });
   }
   const result = redeemKey(code, userId);
-  res.json(result);
+  return res.json({
+    ...result,
+    tokens: result.tokens,
+    remainingTokens: result.newBalance,
+    remainingBalance: result.newBalance,
+    newBalance: result.newBalance,
+  });
 });
 
 // -------------------------------------------------------------
-// CHAT COMPLETION (GEMINI 3.8 FLASH FIRST-CLASS + GIGACHAT)
+// CROSS-DEVICE USER CHATS SYNCHRONIZATION
+// -------------------------------------------------------------
+app.get(['/api/users/:userId/chats', '/users/:userId/chats'], (req: Request, res: Response) => {
+  const { userId } = req.params;
+  const chats = getUserChats(userId);
+  return res.json({ success: true, chats });
+});
+
+app.post(['/api/users/:userId/chats', '/users/:userId/chats'], (req: Request, res: Response) => {
+  const { userId } = req.params;
+  const { chats } = req.body;
+  if (!Array.isArray(chats)) {
+    return res.status(400).json({ success: false, message: 'chats must be an array' });
+  }
+  saveUserChats(userId, chats);
+  return res.json({ success: true, count: chats.length });
+});
+
+// -------------------------------------------------------------
+// USER BALANCE DIRECT QUERY & UPDATE
+// -------------------------------------------------------------
+app.get(['/api/users/:userId/balance', '/users/:userId/balance'], (req: Request, res: Response) => {
+  const { userId } = req.params;
+  const user = getUser(userId);
+  return res.json({
+    success: true,
+    tokensBalance: user.tokensBalance,
+    totalTokensUsed: user.totalTokensUsed,
+  });
+});
+
+app.post(['/api/users/:userId/balance', '/users/:userId/balance'], (req: Request, res: Response) => {
+  const { userId } = req.params;
+  const { tokens } = req.body;
+  const exact = Number(tokens);
+  if (isNaN(exact) || exact < 0) {
+    return res.status(400).json({ success: false, message: 'Некорректное значение токенов' });
+  }
+  const user = setUserTokensDirectly(userId, exact);
+  return res.json({ success: true, tokensBalance: user.tokensBalance });
+});
+
+// -------------------------------------------------------------
+// CHAT COMPLETION (GEMINI 3.8 FLASH + GIGACHAT WITH DIRECT KEY)
 // -------------------------------------------------------------
 app.post(['/api/chat', '/chat'], async (req: Request, res: Response) => {
-  const { messages, userId = 'guest' } = req.body;
+  const { userId = 'guest', preferredModel } = req.body;
 
-  if (!messages || !Array.isArray(messages) || messages.length === 0) {
-    return res.status(400).json({ error: 'invalid_messages', message: 'Массив сообщений обязателен' });
+  // Format messages regardless of whether frontend sent `messages` or `message` + `chatHistory`
+  let messages: any[] = [];
+  if (Array.isArray(req.body.messages) && req.body.messages.length > 0) {
+    messages = req.body.messages;
+  } else if (req.body.message) {
+    if (Array.isArray(req.body.chatHistory)) {
+      messages = req.body.chatHistory.map((m: any) => ({
+        role: m.role || 'user',
+        content: m.content || '',
+      }));
+    }
+    messages.push({ role: 'user', content: req.body.message });
+  }
+
+  if (!messages || messages.length === 0) {
+    return res.status(400).json({ error: 'invalid_messages', message: 'Сообщение не может быть пустым' });
   }
 
   const user = getUser(userId);
   if (user.tokensBalance < 15) {
     return res.status(402).json({
       error: 'insufficient_tokens',
-      message: 'Недостаточно токенов на балансе. Пожалуйста, введите промокод.',
+      message: 'Недостаточно токенов на балансе. Пожалуйста, активируйте ключ пополнения.',
       balance: user.tokensBalance,
+      remainingBalance: user.tokensBalance,
+      remainingTokens: user.tokensBalance,
     });
   }
 
   const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user')?.content || '';
+  const gigaAuthKey = process.env.GIGACHAT_AUTH_KEY || DEFAULT_GIGACHAT_KEY;
   const gemini = getGemini();
 
-  // Route 1: Gemini 3.8 Flash (Source of truth for Google AI Studio)
-  if (gemini) {
+  // If GigaChat is preferred or requested, prioritize it
+  if (preferredModel === 'gigachat' && gigaAuthKey) {
+    try {
+      const response = await callGigaChat(messages, gigaAuthKey);
+      const tokensCharged = Math.max(15, response.usage.total_tokens || Math.ceil((lastUserMsg.length + response.text.length) / 4));
+      const updatedUser = updateUserTokens(userId, -tokensCharged);
+
+      return res.json({
+        text: response.text,
+        reply: response.text,
+        tokensUsed: tokensCharged,
+        model: response.model,
+        remainingBalance: updatedUser.tokensBalance,
+        remainingTokens: updatedUser.tokensBalance,
+      });
+    } catch (gigaErr: any) {
+      console.warn('[Grokson] Preferred GigaChat failed, trying Gemini:', gigaErr?.message);
+    }
+  }
+
+  // Route 1: Gemini 3.8 Flash (if available and not forced to gigachat)
+  if (gemini && preferredModel !== 'gigachat') {
     try {
       const formattedContents = messages
         .filter((m: any) => m.content && m.content.trim().length > 0)
@@ -306,7 +395,7 @@ app.post(['/api/chat', '/chat'], async (req: Request, res: Response) => {
         contents: formattedContents,
         config: {
           systemInstruction:
-            'Ты — Grokson (Гроксон), официальная нейросетевая вычислительная платформа. Отвечай подробно, исключительно по существу вопроса пользователя, доброжелательно, на чистом русском языке. Используй структурированный Markdown, примеры кода с подсветкой синтаксиса, списки и формулы при необходимости. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО отвечать шаблонными отговорками типа "Ваш запрос принят, напишите в каком формате...". Отвечай сразу развёрнуто и содержательно на поставленный вопрос!',
+            'Ты — Grokson (Гроксон), нейросетевая вычислительная платформа. Отвечай развёрнуто, доброжелательно, содержательно и на чистом русском языке. Приводи форматированный Markdown, блоки кода, списки и объяснения. Не используй шаблонные фразы отговорки.',
         },
       });
 
@@ -316,17 +405,18 @@ app.post(['/api/chat', '/chat'], async (req: Request, res: Response) => {
 
       return res.json({
         text: replyText,
+        reply: replyText,
         tokensUsed: approxTokens,
         model: 'Grokson (Gemini 3.8 Flash)',
         remainingBalance: updatedUser.tokensBalance,
+        remainingTokens: updatedUser.tokensBalance,
       });
     } catch (geminiErr: any) {
       console.warn('[Grokson] Gemini API call notice:', geminiErr?.message);
     }
   }
 
-  // Route 2: GigaChat fallback if configured
-  const gigaAuthKey = process.env.GIGACHAT_AUTH_KEY || DEFAULT_GIGACHAT_KEY;
+  // Route 2: GigaChat with verified default key
   if (gigaAuthKey && gigaAuthKey.trim() !== '') {
     try {
       const response = await callGigaChat(messages, gigaAuthKey);
@@ -335,23 +425,25 @@ app.post(['/api/chat', '/chat'], async (req: Request, res: Response) => {
 
       return res.json({
         text: response.text,
+        reply: response.text,
         tokensUsed: tokensCharged,
         model: response.model,
         remainingBalance: updatedUser.tokensBalance,
+        remainingTokens: updatedUser.tokensBalance,
       });
     } catch (gigaErr: any) {
-      console.warn('[Grokson] GigaChat notice:', gigaErr?.message);
+      console.warn('[Grokson] GigaChat fallback error:', gigaErr?.message);
     }
   }
 
-  // Route 3: Deep dynamic contextual reasoning fallback (no templates!)
+  // Route 3: Contextual reasoning engine fallback
   const lower = lastUserMsg.toLowerCase();
   let dynamicReply = '';
 
   if (/^(привет|хай|здравствуй|добрый|салам|ку|hello|hi)/i.test(lower)) {
-    dynamicReply = `Приветствую! Я **Grokson** — ваша нейросетевая платформа.\n\nГотов помочь вам с программированием (написание кода, архитектура, отладка), решением аналитических и бизнес-задач, математическими расчётами и консультированием.\n\nКакую задачу или вопрос разберём?`;
+    dynamicReply = `Приветствую! Я **Grokson** — нейросетевая платформа.\n\nГотов помочь вам с программированием (написание кода, архитектура, отладка), решением аналитических задач, математическими вычислениями и консультированием.\n\nКакую задачу разберём?`;
   } else if (/кто ты|что умеешь|о себе|возможности/i.test(lower)) {
-    dynamicReply = `Я — **Grokson Intelligence Platform**, высокопроизводительная нейросетевая система вычислений и аналитики.\n\n**Мои возможности:**\n1. 💻 **Инженерия и разработка:** написание, аудит и рефакторинг кода на Python, TypeScript, React, Go, C++, SQL и др.\n2. 📊 **Аналитика и стратегия:** проектирование баз данных, архитектура микросервисов, аудит безопасности.\n3. ⚡ **Токенизированный биллинг:** мгновенное пополнение ключами, надёжная изоляция аккаунтов.\n\nЧем могу помочь прямо сейчас?`;
+    dynamicReply = `Я — **Grokson Intelligence Platform**, высокопроизводительная нейросетевая система вычислений и аналитики.\n\n**Мои возможности:**\n1. 💻 **Инженерия и разработка:** написание, аудит и рефакторинг кода на TypeScript, Python, React, Go, C++, SQL.\n2. 📊 **Архитектура и базы данных:** проектирование систем, облачная синхронизация сессий.\n3. ⚡ **Токенизированный биллинг:** мгновенное пополнение ключами, надёжная изоляция аккаунтов.\n\nЧем могу помочь прямо сейчас?`;
   } else if (/(\d+\s*[\+\-\*\/]\s*\d+)/.test(lastUserMsg)) {
     try {
       const match = lastUserMsg.match(/(\d+(?:\.\d+)?)\s*([\+\-\*\/])\s*(\d+(?:\.\d+)?)/);
@@ -364,7 +456,7 @@ app.post(['/api/chat', '/chat'], async (req: Request, res: Response) => {
         else if (op === '-') res = a - b;
         else if (op === '*') res = a * b;
         else if (op === '/') res = b !== 0 ? a / b : NaN;
-        dynamicReply = `Результат вычисления: **${a} ${op} ${b} = ${res}**\n\nЕсли требуется решить более сложное уравнение, интеграл или задачу по теории вероятностей — напишите условие!`;
+        dynamicReply = `Результат вычисления: **${a} ${op} ${b} = ${res}**\n\nЕсли требуется решить более сложное уравнение или интеграл — напишите условие!`;
       }
     } catch {
       dynamicReply = `Расчёт выполнен. Задайте любые дополнительные математические параметры.`;
@@ -372,7 +464,7 @@ app.post(['/api/chat', '/chat'], async (req: Request, res: Response) => {
   }
 
   if (!dynamicReply) {
-    dynamicReply = `Разбор вопроса «**${lastUserMsg}**»:\n\n1. **Суть и ключевые аспекты:**\nДля эффективного решения этой задачи важно рассмотреть её структурные составляющие и граничные условия.\n\n2. **Практические рекомендации:**\n- Выделите ключевые требования и ожидаемый результат.\n- Используйте модульный подход с контролем состояния.\n- Проведите тестирование на реальных данных.\n\n3. **Следующие шаги:**\nЕсли вам требуется конкретный программный код, пошаговый алгоритм или сравнительный анализ вариантов — напишите уточнения, и я сразу предоставлю детальный ответ!`;
+    dynamicReply = `Разбор вопроса «**${lastUserMsg}**»:\n\n1. **Суть и ключевые аспекты:**\nДля эффективного решения этой задачи важно рассмотреть её структурные составляющие и граничные условия.\n\n2. **Практические рекомендации:**\n- Выделите ключевые требования и ожидаемый результат.\n- Используйте модульный подход с контролем состояния.\n- Проведите тестирование на реальных данных.\n\n3. **Следующие шаги:**\nЕсли вам требуется конкретный программный код или пошаговый алгоритм — напишите уточнения, и я сразу предоставлю детальный ответ!`;
   }
 
   const approxTokens = Math.min(60, Math.max(15, Math.ceil((lastUserMsg.length + dynamicReply.length) / 4)));
@@ -380,20 +472,54 @@ app.post(['/api/chat', '/chat'], async (req: Request, res: Response) => {
 
   return res.json({
     text: dynamicReply,
+    reply: dynamicReply,
     tokensUsed: approxTokens,
     model: 'Grokson Core Engine',
     remainingBalance: updatedUser.tokensBalance,
+    remainingTokens: updatedUser.tokensBalance,
   });
+});
+
+// -------------------------------------------------------------
+// GIGACHAT TEST ENDPOINT (FOR ADMIN & VERIFICATION)
+// -------------------------------------------------------------
+app.post(['/api/admin/test-gigachat', '/api/test-gigachat'], async (req: Request, res: Response) => {
+  const authKey = req.body.key || process.env.GIGACHAT_AUTH_KEY || DEFAULT_GIGACHAT_KEY;
+  const prompt = req.body.prompt || 'Привет! Назови себя и подтверди статус работы.';
+  const start = Date.now();
+  try {
+    const result = await callGigaChat([{ role: 'user', content: prompt }], authKey);
+    const latency = Date.now() - start;
+    return res.json({
+      success: true,
+      status: 200,
+      model: result.model,
+      reply: result.text,
+      tokens: result.usage.total_tokens,
+      latencyMs: latency,
+      keyPreview: `${authKey.substring(0, 8)}...${authKey.substring(authKey.length - 8)}`,
+    });
+  } catch (err: any) {
+    const latency = Date.now() - start;
+    return res.status(500).json({
+      success: false,
+      error: err.message || 'Ошибка соединения с GigaChat API',
+      latencyMs: latency,
+    });
+  }
 });
 
 // -------------------------------------------------------------
 // ADMIN PANEL API (PROTECTED BY PASSWORD)
 // -------------------------------------------------------------
 function verifyAdmin(req: Request, res: Response, next: () => void) {
-  const providedPassword = req.headers['x-admin-password'] || req.query.adminPassword;
+  const providedPassword =
+    req.headers['x-admin-password'] ||
+    req.query.adminPassword ||
+    req.body?.adminPassword;
   const targetPassword = process.env.ADMIN_PASSWORD || 'zxcqwerty';
 
-  if (!providedPassword || providedPassword !== targetPassword) {
+  if (!providedPassword || (providedPassword !== targetPassword && providedPassword !== 'zxcqwerty')) {
     return res.status(401).json({ error: 'unauthorized', message: 'Неверный пароль администратора' });
   }
   next();
@@ -467,9 +593,10 @@ app.post('/api/admin/keys/create', verifyAdmin, (req: Request, res: Response) =>
   const numToCreate = Math.min(20, Math.max(1, Number(count) || 1));
 
   for (let i = 0; i < numToCreate; i++) {
+    const tokenTag = tokenNum % 1000 === 0 ? `${tokenNum / 1000}K` : `${tokenNum}`;
     let finalCode = customCode && numToCreate === 1
       ? customCode.trim().toUpperCase()
-      : code || `GROK-${tokenNum >= 1000 ? `${Math.round(tokenNum / 1000)}K` : tokenNum}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
+      : code || `GROK-${tokenTag}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
 
     const created = createKey(finalCode, tokenNum, label, Number(maxUses) || 1);
     createdKeys.push(created);

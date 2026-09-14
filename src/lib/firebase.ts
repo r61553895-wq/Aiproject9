@@ -17,7 +17,7 @@ import {
   updateDoc,
   deleteDoc,
 } from 'firebase/firestore';
-import type { UserAccount } from '../types';
+import type { UserAccount, TokenKey } from '../types';
 import firebaseConfigData from '../../firebase-applet-config.json';
 
 const firebaseConfig = {
@@ -533,5 +533,155 @@ export async function deleteUserFromFirestore(userId: string): Promise<boolean> 
     return true;
   } catch (err) {
     return false;
+  }
+}
+
+// -------------------------------------------------------------
+// CHAT SESSIONS CLOUD PERSISTENCE (CROSS-DEVICE SYNC)
+// -------------------------------------------------------------
+export async function saveUserChatSessions(userId: string, sessions: any[]): Promise<boolean> {
+  try {
+    if (!userId || !Array.isArray(sessions)) return false;
+    const cleanId = userId.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_');
+    
+    await setDoc(doc(db, 'user_chats', cleanId), {
+      userId,
+      sessions,
+      count: sessions.length,
+      updatedAt: Date.now(),
+    });
+    return true;
+  } catch (err) {
+    console.warn('Could not save chat sessions to Firestore:', err);
+    return false;
+  }
+}
+
+export async function getUserChatSessions(userId: string): Promise<any[] | null> {
+  try {
+    if (!userId) return null;
+    const cleanId = userId.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_');
+    const docSnap = await getDoc(doc(db, 'user_chats', cleanId));
+    if (docSnap.exists() && Array.isArray(docSnap.data().sessions)) {
+      return docSnap.data().sessions;
+    }
+    return null;
+  } catch (err) {
+    console.warn('Could not fetch chat sessions from Firestore:', err);
+    return null;
+  }
+}
+
+// -------------------------------------------------------------
+// USER AUTHORITATIVE TOKEN BALANCE FROM FIRESTORE
+// -------------------------------------------------------------
+export async function getUserFirestoreTokens(userId: string): Promise<number | null> {
+  try {
+    if (!userId) return null;
+    const clean = userId.trim();
+    const cleanLower = clean.toLowerCase();
+    const cleanWithoutUsr = cleanLower.replace(/^usr_/, '');
+
+    // 1. Direct doc lookup
+    const d1 = await getDoc(doc(db, 'users', clean));
+    if (d1.exists() && typeof d1.data().tokensBalance === 'number') {
+      return d1.data().tokensBalance;
+    }
+
+    const d2 = await getDoc(doc(db, 'users', `usr_${cleanWithoutUsr}`));
+    if (d2.exists() && typeof d2.data().tokensBalance === 'number') {
+      return d2.data().tokensBalance;
+    }
+
+    // 2. Search by username or id in users
+    const snap = await getDocs(collection(db, 'users'));
+    for (const d of snap.docs) {
+      const data = d.data();
+      const u = (data.username || '').toLowerCase();
+      if (u === cleanLower || u === cleanWithoutUsr || d.id === clean || data.id === clean) {
+        if (typeof data.tokensBalance === 'number') {
+          return data.tokensBalance;
+        }
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// -------------------------------------------------------------
+// FIRESTORE VOUCHER KEYS (CROSS-DEVICE KEYS)
+// -------------------------------------------------------------
+export async function saveFirestoreKey(key: TokenKey): Promise<boolean> {
+  try {
+    const code = key.code.trim().toUpperCase();
+    await setDoc(doc(db, 'token_keys', code), {
+      ...key,
+      code,
+      updatedAt: Date.now(),
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function getFirestoreKeys(): Promise<TokenKey[]> {
+  try {
+    const snap = await getDocs(collection(db, 'token_keys'));
+    return snap.docs.map((d) => d.data() as TokenKey);
+  } catch {
+    return [];
+  }
+}
+
+export async function redeemFirestoreKey(
+  code: string,
+  userId: string
+): Promise<{ success: boolean; tokens: number; message: string; newBalance: number } | null> {
+  try {
+    const cleanCode = code.trim().toUpperCase();
+    const keyRef = doc(db, 'token_keys', cleanCode);
+    const keySnap = await getDoc(keyRef);
+
+    if (!keySnap.exists()) return null;
+
+    const data = keySnap.data() as TokenKey;
+    const maxUses = data.maxUses || 1;
+    const currentUses = data.usedCount || (data.isRedeemed ? 1 : 0);
+
+    if (currentUses >= maxUses) {
+      return {
+        success: false,
+        tokens: 0,
+        message: 'Лимит активаций этого ключа исчерпан',
+        newBalance: 0,
+      };
+    }
+
+    const newUses = currentUses + 1;
+    const isNowRedeemed = newUses >= maxUses;
+
+    await updateDoc(keyRef, {
+      usedCount: newUses,
+      isRedeemed: isNowRedeemed,
+      redeemedBy: userId,
+      redeemedAt: Date.now(),
+    });
+
+    // Get current balance and add tokens
+    const currentTokens = (await getUserFirestoreTokens(userId)) ?? 10000;
+    const newBal = currentTokens + data.tokens;
+    await updateUserFirestoreTokens(userId, newBal);
+
+    return {
+      success: true,
+      tokens: data.tokens,
+      message: `Ключ успешно активирован! Начислено +${data.tokens.toLocaleString('ru-RU')} токенов.`,
+      newBalance: newBal,
+    };
+  } catch {
+    return null;
   }
 }

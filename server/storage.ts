@@ -43,6 +43,7 @@ export interface AppStore {
   keys: Record<string, TokenKey>;
   users: Record<string, UserSession>;
   accounts: Record<string, UserAccount>;
+  userChats?: Record<string, any[]>;
   totalTokensConsumed: number;
 }
 
@@ -565,3 +566,65 @@ export function updateAccountRole(id: string, role: 'admin' | 'user'): boolean {
   }
   return false;
 }
+
+export function getUserChats(userId: string): any[] {
+  const store = loadStore();
+  if (!store.userChats) return [];
+  const clean = userId.trim();
+  const lower = clean.toLowerCase();
+  const lowerNoUsr = lower.replace(/^usr_/, '');
+
+  return (
+    store.userChats[clean] ||
+    store.userChats[lower] ||
+    store.userChats[`usr_${lowerNoUsr}`] ||
+    store.userChats[lowerNoUsr] ||
+    []
+  );
+}
+
+export function saveUserChats(userId: string, chats: any[]): boolean {
+  const store = loadStore();
+  if (!store.userChats) store.userChats = {};
+  const clean = userId.trim();
+  store.userChats[clean] = chats;
+
+  // Also save under usr_ or username if known
+  const account = getAccountById(userId);
+  if (account) {
+    store.userChats[account.id] = chats;
+    store.userChats[account.username.toLowerCase()] = chats;
+  }
+
+  saveStore(store);
+  return true;
+}
+
+export function setUserTokensDirectly(userId: string, tokens: number): UserSession {
+  const store = loadStore();
+  const clean = userId.trim();
+  const exact = Math.max(0, Math.floor(tokens));
+
+  const targetAccount = getAccountById(clean);
+  const effectiveId = targetAccount ? targetAccount.id : clean;
+
+  const user = getUser(effectiveId);
+  user.tokensBalance = exact;
+  store.users[effectiveId] = user;
+  if (clean !== effectiveId) {
+    store.users[clean] = { ...user, id: clean };
+  }
+
+  if (targetAccount) {
+    if (store.accounts && store.accounts[targetAccount.id]) {
+      store.accounts[targetAccount.id].tokensBalance = exact;
+    }
+    if (store.accounts && store.accounts[targetAccount.username]) {
+      store.accounts[targetAccount.username].tokensBalance = exact;
+    }
+  }
+
+  saveStore(store);
+  return user;
+}
+

@@ -31,7 +31,14 @@ import {
   saveLocalAccounts,
 } from './utils/safeApi';
 import { generateEdgeAIResponse } from './utils/aiFallback';
-import { logoutFirebaseUser } from './lib/firebase';
+import {
+  logoutFirebaseUser,
+  saveUserChatSessions,
+  getUserChatSessions,
+  getUserFirestoreTokens,
+  updateUserFirestoreTokens,
+  redeemFirestoreKey,
+} from './lib/firebase';
 
 const CHAT_SESSIONS_KEY = 'grokson_chat_sessions';
 const CURRENT_USER_KEY = 'grokson_current_user';
@@ -81,6 +88,7 @@ export const App: React.FC = () => {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [preferredModel, setPreferredModel] = useState<'gigachat' | 'gemini'>('gigachat');
 
   // Modals
   const [isRedeemOpen, setIsRedeemOpen] = useState(false);
@@ -92,38 +100,96 @@ export const App: React.FC = () => {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Save sessions to localStorage
+  // Save sessions to localStorage & Cloud
   useEffect(() => {
     try {
       localStorage.setItem(CHAT_SESSIONS_KEY, JSON.stringify(sessions));
     } catch (e) {}
-  }, [sessions]);
 
-  // Save tokens to localStorage
+    if (currentUser?.id) {
+      const timer = setTimeout(() => {
+        saveUserChatSessions(currentUser.id, sessions);
+        safeFetchJson(`/api/users/${encodeURIComponent(currentUser.id)}/chats`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chats: sessions }),
+        }).catch(() => {});
+      }, 1000);
+      return () => clearTimeout(timer);
+    }
+  }, [sessions, currentUser?.id]);
+
+  // Save tokens to localStorage & Cloud
   useEffect(() => {
     try {
       localStorage.setItem(TOKENS_BALANCE_KEY, tokensBalance.toString());
     } catch (e) {}
-  }, [tokensBalance]);
+
+    if (currentUser?.id) {
+      const timer = setTimeout(() => {
+        updateUserFirestoreTokens(currentUser.id, tokensBalance);
+        safeFetchJson(`/api/users/${encodeURIComponent(currentUser.id)}/balance`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tokens: tokensBalance }),
+        }).catch(() => {});
+      }, 1000);
+      return () => clearTimeout(timer);
+    }
+  }, [tokensBalance, currentUser?.id]);
 
   // Sync on startup with server and listen for token updates
   useEffect(() => {
     syncSavedAccountsWithServer();
 
-    const fetchCurrentBalance = () => {
-      if (!currentUser?.id) return;
-      safeFetchJson<{ account?: UserAccount }>(`/api/auth/me?userId=${encodeURIComponent(currentUser.id)}`, {}, 4000)
-        .then((res) => {
-          if (res.ok && res.data?.account) {
-            setCurrentUser(res.data.account);
-            setTokensBalance(res.data.account.tokensBalance);
-            localStorage.setItem(CURRENT_USER_KEY, JSON.stringify(res.data.account));
+    if (!currentUser?.id) return;
+
+    const loadUserCloudData = async () => {
+      // 1. Fetch balance from Firestore first (cross-device source of truth)
+      try {
+        const fbTokens = await getUserFirestoreTokens(currentUser.id);
+        if (typeof fbTokens === 'number') {
+          setTokensBalance(fbTokens);
+          setCurrentUser((prev) => (prev ? { ...prev, tokensBalance: fbTokens } : prev));
+        } else {
+          const meRes = await safeFetchJson<{ account?: UserAccount }>(
+            `/api/auth/me?userId=${encodeURIComponent(currentUser.id)}`,
+            {},
+            3000
+          );
+          if (meRes.ok && meRes.data?.account) {
+            setTokensBalance(meRes.data.account.tokensBalance);
+            setCurrentUser(meRes.data.account);
           }
-        })
-        .catch(() => {});
+        }
+      } catch {}
+
+      // 2. Fetch user's saved chats (cross-device sync)
+      try {
+        let loadedChats = await getUserChatSessions(currentUser.id);
+        if (!loadedChats || loadedChats.length === 0) {
+          loadedChats = await getUserChatSessions(currentUser.username);
+        }
+        if (!loadedChats || loadedChats.length === 0) {
+          const serverChatRes = await safeFetchJson<{ chats?: ChatSession[] }>(
+            `/api/users/${encodeURIComponent(currentUser.id)}/chats`,
+            {},
+            3000
+          );
+          if (serverChatRes.ok && Array.isArray(serverChatRes.data?.chats) && serverChatRes.data.chats.length > 0) {
+            loadedChats = serverChatRes.data.chats;
+          }
+        }
+        if (loadedChats && loadedChats.length > 0) {
+          setSessions(loadedChats);
+          setCurrentSessionId(loadedChats[0].id);
+        }
+      } catch (e) {
+        console.warn('Error loading cloud chats:', e);
+      }
     };
 
-    fetchCurrentBalance();
+    loadUserCloudData();
 
     const handleTokensUpdated = (e: any) => {
       if (typeof e.detail?.balance === 'number') {
@@ -133,11 +199,11 @@ export const App: React.FC = () => {
     };
 
     window.addEventListener('grokson_tokens_updated', handleTokensUpdated);
-    window.addEventListener('focus', fetchCurrentBalance);
+    window.addEventListener('focus', loadUserCloudData);
 
     return () => {
       window.removeEventListener('grokson_tokens_updated', handleTokensUpdated);
-      window.removeEventListener('focus', fetchCurrentBalance);
+      window.removeEventListener('focus', loadUserCloudData);
     };
   }, [currentUser?.id]);
 
@@ -251,6 +317,7 @@ export const App: React.FC = () => {
 
       const res = await safeFetchJson<{
         reply?: string;
+        text?: string;
         tokensUsed?: number;
         remainingTokens?: number;
         model?: string;
@@ -262,19 +329,20 @@ export const App: React.FC = () => {
           message: text,
           userId: currentUser?.id || 'guest_user',
           chatHistory: historyPayload,
+          preferredModel,
         }),
       }, 16000);
 
       let replyContent = '';
       let tokensUsed = 25;
-      let modelName = 'Grokson Core';
+      let modelName = preferredModel === 'gigachat' ? 'GigaChat (Сбер)' : 'Gemini 3.8 Flash';
 
-      if (res.ok && res.data?.reply) {
-        replyContent = res.data.reply;
-        tokensUsed = res.data.tokensUsed || 25;
-        modelName = res.data.model || 'Gemini 3.8 Flash';
+      if (res.ok && (res.data?.reply || (res.data as any)?.text)) {
+        replyContent = res.data?.reply || (res.data as any)?.text;
+        tokensUsed = res.data?.tokensUsed || 25;
+        modelName = res.data?.model || (preferredModel === 'gigachat' ? 'GigaChat (Сбер)' : 'Gemini 3.8 Flash');
 
-        if (typeof res.data.remainingTokens === 'number') {
+        if (typeof res.data?.remainingTokens === 'number') {
           setTokensBalance(res.data.remainingTokens);
         } else {
           setTokensBalance((prev) => Math.max(0, prev - tokensUsed));
@@ -348,6 +416,7 @@ export const App: React.FC = () => {
         success: boolean;
         tokens?: number;
         newBalance?: number;
+        remainingTokens?: number;
         message?: string;
       }>('/api/redeem-key', {
         method: 'POST',
@@ -360,13 +429,20 @@ export const App: React.FC = () => {
 
       if (res.ok && res.data?.success) {
         const added = res.data.tokens || 0;
-        const newBal = typeof res.data.newBalance === 'number' ? res.data.newBalance : tokensBalance + added;
+        const newBal =
+          typeof res.data.newBalance === 'number'
+            ? res.data.newBalance
+            : typeof res.data.remainingTokens === 'number'
+            ? res.data.remainingTokens
+            : tokensBalance + added;
+
         setTokensBalance(newBal);
 
         if (currentUser) {
           const updated = { ...currentUser, tokensBalance: newBal };
           setCurrentUser(updated);
           localStorage.setItem(CURRENT_USER_KEY, JSON.stringify(updated));
+          updateUserFirestoreTokens(currentUser.id, newBal);
         }
 
         return {
@@ -378,7 +454,21 @@ export const App: React.FC = () => {
       }
     } catch {}
 
-    // 2. Fallback to local key validation
+    // 2. Try Firestore key redemption
+    try {
+      const fbKeyRes = await redeemFirestoreKey(cleanCode, currentUser?.id || 'guest_user');
+      if (fbKeyRes && fbKeyRes.success) {
+        setTokensBalance(fbKeyRes.newBalance);
+        if (currentUser) {
+          const updated = { ...currentUser, tokensBalance: fbKeyRes.newBalance };
+          setCurrentUser(updated);
+          localStorage.setItem(CURRENT_USER_KEY, JSON.stringify(updated));
+        }
+        return fbKeyRes;
+      }
+    } catch {}
+
+    // 3. Fallback to local key validation
     const localRes = redeemLocalKey(cleanCode, currentUser?.id || 'guest_user', tokensBalance);
     if (localRes.success) {
       setTokensBalance(localRes.newBalance);
@@ -386,17 +476,76 @@ export const App: React.FC = () => {
         const updated = { ...currentUser, tokensBalance: localRes.newBalance };
         setCurrentUser(updated);
         localStorage.setItem(CURRENT_USER_KEY, JSON.stringify(updated));
+        updateUserFirestoreTokens(currentUser.id, localRes.newBalance);
       }
     }
     return localRes;
   };
 
-  const handleAuthSuccess = (account: UserAccount, tokensDelta?: number) => {
+  const handleAuthSuccess = async (account: UserAccount, tokensDelta?: number) => {
     setCurrentUser(account);
     localStorage.setItem(CURRENT_USER_KEY, JSON.stringify(account));
+
+    // Save account to saved local accounts list on this device so it's remembered
+    try {
+      const saved = getLocalAccounts();
+      const cleanId = account.id;
+      const exists = saved.some(
+        (a) => a.id === cleanId || a.username.toLowerCase() === account.username.toLowerCase()
+      );
+      if (!exists) {
+        saved.unshift(account);
+        saveLocalAccounts(saved);
+      }
+    } catch {}
+
     const newBal = account.tokensBalance + (tokensDelta || 0);
     setTokensBalance(newBal);
     localStorage.setItem(TOKENS_BALANCE_KEY, newBal.toString());
+
+    // 🌟 CROSS-DEVICE CHAT & BALANCE SYNCHRONIZATION:
+    try {
+      // 1. Authoritative token balance from Firestore
+      const fbTokens = await getUserFirestoreTokens(account.id);
+      if (typeof fbTokens === 'number') {
+        setTokensBalance(fbTokens);
+        account.tokensBalance = fbTokens;
+        setCurrentUser({ ...account, tokensBalance: fbTokens });
+        localStorage.setItem(CURRENT_USER_KEY, JSON.stringify({ ...account, tokensBalance: fbTokens }));
+      }
+
+      // 2. Fetch user's saved chats
+      let loadedChats: ChatSession[] | null = await getUserChatSessions(account.id);
+      if (!loadedChats || loadedChats.length === 0) {
+        loadedChats = await getUserChatSessions(account.username);
+      }
+      if (!loadedChats || loadedChats.length === 0) {
+        const serverChatRes = await safeFetchJson<{ chats?: ChatSession[] }>(
+          `/api/users/${encodeURIComponent(account.id)}/chats`,
+          {},
+          3000
+        );
+        if (serverChatRes.ok && Array.isArray(serverChatRes.data?.chats) && serverChatRes.data.chats.length > 0) {
+          loadedChats = serverChatRes.data.chats;
+        }
+      }
+
+      if (loadedChats && loadedChats.length > 0) {
+        setSessions(loadedChats);
+        setCurrentSessionId(loadedChats[0].id);
+        localStorage.setItem(CHAT_SESSIONS_KEY, JSON.stringify(loadedChats));
+      } else {
+        // First device or no existing chats: sync current sessions to cloud
+        saveUserChatSessions(account.id, sessions);
+        safeFetchJson(`/api/users/${encodeURIComponent(account.id)}/chats`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chats: sessions }),
+        }).catch(() => {});
+      }
+    } catch (e) {
+      console.warn('Error synchronizing chats on login:', e);
+    }
   };
 
   const handleLogout = async () => {
@@ -467,10 +616,39 @@ export const App: React.FC = () => {
 
             <div className="flex items-center gap-2 min-w-0">
               <GroksonLogo size="sm" showText={true} />
-              <span className="hidden sm:inline-block text-[11px] font-mono text-zinc-400 px-2 py-0.5 rounded-full bg-white/5 border border-white/10 shrink-0">
+              <span className="hidden lg:inline-block text-[11px] font-mono text-zinc-400 px-2 py-0.5 rounded-full bg-white/5 border border-white/10 shrink-0">
                 Core v3.8
               </span>
             </div>
+          </div>
+
+          {/* Center/Model Selector */}
+          <div className="flex items-center bg-white/5 border border-white/10 rounded-xl p-0.5 text-xs font-medium">
+            <button
+              type="button"
+              onClick={() => setPreferredModel('gigachat')}
+              className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer flex items-center gap-1.5 text-xs ${
+                preferredModel === 'gigachat'
+                  ? 'bg-white text-black font-bold shadow-sm'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+              title="Сбер GigaChat AI"
+            >
+              <Sparkles className="w-3 h-3 text-emerald-400" />
+              <span>GigaChat</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setPreferredModel('gemini')}
+              className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer flex items-center gap-1.5 text-xs ${
+                preferredModel === 'gemini'
+                  ? 'bg-white text-black font-bold shadow-sm'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+              title="Google Gemini AI"
+            >
+              <span>Gemini 3.8</span>
+            </button>
           </div>
 
           <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
