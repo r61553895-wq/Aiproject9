@@ -1,0 +1,112 @@
+{
+  "keys": {
+    "GROK-VIP-100K": {
+      "code": "GROK-VIP-100K",
+      "tokens": 100000,
+      "label": "VIP ключ (100,000 токенов)",
+      "createdAt": 1789373792789,
+      "isRedeemed": false,
+      "maxUses": 100,
+      "usedCount": 0
+    },
+    "START-2026": {
+      "code": "START-2026",
+      "tokens": 20000,
+      "label": "Промокод 2026 (20,000 токенов)",
+      "createdAt": 1789373792789,
+      "isRedeemed": false,
+      "maxUses": 100,
+      "usedCount": 0
+    }
+  },
+  "users": {
+    "usr_1789374176433_rw91d": {
+      "id": "usr_1789374176433_rw91d",
+      "username": "rom",
+      "name": "Rom",
+      "tokensBalance": 19752,
+      "totalTokensUsed": 1595,
+      "createdAt": 1789374176433,
+      "lastActive": 1789374570666,
+      "isRegistered": true
+    },
+    "usr_1789376240148_5z1by": {
+      "id": "usr_1789376240148_5z1by",
+      "username": "curluser",
+      "name": "Curl User",
+      "tokensBalance": 9845,
+      "totalTokensUsed": 155,
+      "createdAt": 1789376240148,
+      "lastActive": 1789376248623,
+      "isRegistered": true
+    },
+    "usr_1789377739058_mcr2b": {
+      "id": "usr_1789377739058_mcr2b",
+      "name": "Rrrrr",
+      "username": "rrrrr",
+      "tokensBalance": 9663,
+      "totalTokensUsed": 337,
+      "createdAt": 1789377739058,
+      "lastActive": 1789378128678,
+      "isRegistered": true
+    },
+    "usr_g_g_7465737467": {
+      "id": "usr_g_g_7465737467",
+      "name": "Тестовый Гугл",
+      "username": "testgoogle",
+      "tokensBalance": 10000,
+      "totalTokensUsed": 0,
+      "createdAt": 1789379306260,
+      "lastActive": 1789379306260,
+      "isRegistered": true
+    }
+  },
+  "accounts": {
+    "usr_1789374176433_rw91d": {
+      "id": "usr_1789374176433_rw91d",
+      "username": "rom",
+      "passwordHash": "5a039c3151c05e7121635ae6cafda1e91a6d8735ec6abd871ab9c19994fca1e9",
+      "name": "Rom",
+      "tokensBalance": 19752,
+      "totalTokensUsed": 1595,
+      "createdAt": 1789374176433,
+      "lastLoginAt": 1789374249796,
+      "role": "user"
+    },
+    "usr_1789376240148_5z1by": {
+      "id": "usr_1789376240148_5z1by",
+      "username": "curluser",
+      "passwordHash": "d7b1f6fd2f01e7cd2c4c98995d9cf0cc970052963e67630ec8b15c5c05ea806c",
+      "name": "Curl User",
+      "tokensBalance": 9845,
+      "totalTokensUsed": 155,
+      "createdAt": 1789376240148,
+      "lastLoginAt": 1789376240148,
+      "role": "user"
+    },
+    "usr_1789377739058_mcr2b": {
+      "id": "usr_1789377739058_mcr2b",
+      "username": "rrrrr",
+      "passwordHash": "d17f25ecfbcc7857f7bebea469308be0b2580943e96d13a3ad98a13675c4bfc2",
+      "name": "Rrrrr",
+      "tokensBalance": 9663,
+      "totalTokensUsed": 337,
+      "createdAt": 1789377739058,
+      "lastLoginAt": 1789377739058,
+      "role": "user"
+    },
+    "usr_g_g_7465737467": {
+      "id": "usr_g_g_7465737467",
+      "username": "testgoogle",
+      "passwordHash": "714ef21d5550586fe3109e04ee15a6866686e961b36ab18e198849d3ecad12cb",
+      "name": "Тестовый Гугл",
+      "email": "testgoogle@gmail.com",
+      "tokensBalance": 10000,
+      "totalTokensUsed": 0,
+      "createdAt": 1789379306260,
+      "lastLoginAt": 1789379306260,
+      "role": "user"
+    }
+  },
+  "totalTokensConsumed": 2087
+}

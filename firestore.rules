@@ -1,0 +1,25 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper function to check authentication
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Users collection
+    match /users/{userId} {
+      allow read: if true;
+      allow write: if true;
+    }
+
+    // Chats and messages
+    match /chats/{chatId} {
+      allow read, write: if true;
+    }
+
+    // Admin and general storage
+    match /{document=**} {
+      allow read, write: if true;
+    }
+  }
+}
